@@ -1,0 +1,79 @@
+# -------------------------
+# Node build stage
+# -------------------------
+FROM node:20-alpine AS node-builder
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm install
+
+COPY resources ./resources
+COPY public ./public
+COPY vite.config.js ./
+
+RUN npm run build
+
+
+# -------------------------
+# PHP + Apache stage
+# -------------------------
+FROM php:8.2-apache
+
+WORKDIR /var/www/html
+
+# Install required PHP extensions
+RUN apt-get update && apt-get install -y \
+    git \
+    unzip \
+    libzip-dev \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    && docker-php-ext-install \
+    pdo_mysql \
+    mbstring \
+    bcmath \
+    exif \
+    pcntl \
+    zip \
+    && a2enmod rewrite \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# Copy Laravel application
+COPY . .
+
+# Install Laravel dependencies
+RUN composer install \
+    --no-dev \
+    --optimize-autoloader \
+    --no-interaction \
+    --prefer-dist
+
+# Copy Vite production build
+COPY --from=node-builder /app/public/build ./public/build
+
+# Apache should use Laravel public folder
+ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
+
+RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' \
+    /etc/apache2/sites-available/000-default.conf \
+    /etc/apache2/apache2.conf \
+    /etc/apache2/sites-available/default-ssl.conf
+
+# Allow Laravel .htaccess
+RUN sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' \
+    /etc/apache2/apache2.conf
+
+# Permissions
+RUN chown -R www-data:www-data \
+    storage \
+    bootstrap/cache
+
+EXPOSE 80
+
+CMD ["apache2-foreground"]
